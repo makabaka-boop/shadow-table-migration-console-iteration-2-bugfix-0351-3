@@ -1,0 +1,112 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f4f6fb;
+  color: #1f2937;
+}
+
+body { margin: 0; }
+.app { max-width: 1220px; margin: 0 auto; padding: 32px 20px 60px; }
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+h1 { margin: 0 0 6px; font-size: 28px; }
+h2 { margin: 0 0 14px; font-size: 18px; }
+h2 span { color: #6b7280; font-size: 13px; font-weight: 500; }
+p { color: #4b5563; }
+
+.panel {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 6%);
+}
+
+.panel-title { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.actions { display: flex; gap: 10px; }
+button {
+  border: 1px solid #2563eb;
+  background: white;
+  color: #1d4ed8;
+  border-radius: 9px;
+  padding: 9px 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: #eff6ff; }
+button.primary { background: #2563eb; color: white; }
+button.primary:hover:not(:disabled) { background: #1d4ed8; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+.badges { display: flex; flex-direction: column; gap: 8px; }
+.revision {
+  background: #e0f2fe;
+  border: 1px solid #7dd3fc;
+  color: #075985;
+  padding: 12px 16px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.revision.generation { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.revision strong { font-size: 22px; margin-left: 6px; }
+
+.banner { padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; font-weight: 650; }
+.banner.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.banner.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+
+.mapping-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.mapping-card { display: flex; flex-direction: column; gap: 8px; background: #f9fafb; border: 1px solid #e5e7eb; padding: 14px; border-radius: 12px; }
+.field-name { font-weight: 700; }
+select, input {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+  background: white;
+}
+
+.preview { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 16px; padding: 12px 14px; border-radius: 10px; }
+.preview.ok { background: #ecfdf5; border: 1px solid #6ee7b7; }
+.preview.bad { background: #fff1f2; border: 1px solid #fda4af; }
+.restore-preview { flex-direction: column; align-items: flex-start; gap: 10px; background: #f5f3ff; border: 1px solid #c4b5fd; width: auto; }
+.restore-preview .table-wrap { width: 100%; }
+.diff-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.diff-badge {
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 13px;
+  font-weight: 650;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+}
+.diff-badge.add { background: #dcfce7; color: #166534; border-color: #86efac; }
+.diff-badge.remove { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+.diff-badge.change { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+.diff-note { font-size: 13px; color: #92400e; }
+
+.table-wrap { overflow: auto; border: 1px solid #e5e7eb; border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; background: white; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+th { background: #f8fafc; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #475569; }
+code { background: #f1f5f9; padding: 2px 5px; border-radius: 5px; }
+
+.error-panel { border-color: #fca5a5; }
+.two-column { display: grid; grid-template-columns: 1.2fr .8fr; gap: 24px; }
+.inline-form, .faults { display: flex; flex-wrap: wrap; gap: 8px; }
+.inline-form input { width: calc(25% - 8px); min-width: 110px; }
+.hint { font-size: 13px; word-break: break-all; }
+
+@media (max-width: 820px) {
+  header, .panel-title { flex-direction: column; align-items: stretch; }
+  .mapping-grid, .two-column { grid-template-columns: 1fr; }
+  .actions { flex-direction: column; }
+}
