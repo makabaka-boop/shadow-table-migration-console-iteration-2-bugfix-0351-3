@@ -143,6 +143,38 @@ function versionKindLabel(version) {
     : '字段迁移';
 }
 
+function HistoryRowTable({ rows, partialMode, selectedLegacyIds, onToggle }) {
+  const columns = ['legacy_id', 'id', 'code', 'label'];
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {partialMode && <th>仅恢复</th>}
+            {columns.map((key) => <th key={key}>{key}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              {partialMode && (
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selectedLegacyIds.includes(row.legacy_id)}
+                    onChange={() => onToggle(row.legacy_id)}
+                  />
+                </td>
+              )}
+              {columns.map((key) => <td key={key}>{JSON.stringify(row[key])}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function DiffSummary({ diff }) {
   if (!diff) return null;
   return (
@@ -156,17 +188,33 @@ function DiffSummary({ diff }) {
 }
 
 function DiffTable({ diff }) {
+  const added = diff?.added || [];
+  const removed = diff?.removed || [];
   const changed = diff?.changed || [];
-  if (!changed.length) return null;
+  if (!added.length && !removed.length && !changed.length) return null;
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>id</th><th>变化字段</th><th>当前正式表</th><th>候选（恢复后）</th></tr>
+          <tr><th>差异</th><th>legacy_id</th><th>id</th><th>变化字段</th><th>当前正式表</th><th>候选（恢复后）</th></tr>
         </thead>
         <tbody>
+          {added.map((item) => (
+            <tr key={`add-${item.legacy_id}`}>
+              <td className="diff-add">候选新增</td><td>{item.legacy_id}</td><td>{item.id}</td>
+              <td colSpan="3" />
+            </tr>
+          ))}
+          {removed.map((item) => (
+            <tr key={`remove-${item.legacy_id}`}>
+              <td className="diff-remove">候选移除</td><td>{item.legacy_id}</td><td>{item.id}</td>
+              <td colSpan="3" />
+            </tr>
+          ))}
           {changed.map((item) => (
-            <tr key={item.id}>
+            <tr key={`change-${item.legacy_id}`}>
+              <td className="diff-change">字段变化</td>
+              <td>{item.legacy_id}</td>
               <td>{item.id}</td>
               <td>{item.columns.join(', ')}</td>
               <td><code>{JSON.stringify(item.current)}</code></td>
@@ -188,6 +236,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [historyRows, setHistoryRows] = useState([]);
   const [selectedVersion, setSelectedVersion] = useState('');
+  const [partialMode, setPartialMode] = useState(false);
+  const [selectedLegacyIds, setSelectedLegacyIds] = useState([]);
   const [faults, setFaults] = useState({ preview_copy: false, commit_switch: false, restore_switch: false });
   const [newLegacy, setNewLegacy] = useState({ legacy_id: '', code: '', raw_name: '', note: '' });
 
@@ -210,12 +260,24 @@ export default function App() {
     if (state && selectedVersion === '' && latestVersion) setSelectedVersion(String(latestVersion));
   }, [state, selectedVersion, latestVersion]);
 
-  // Drop restore preview whenever the chosen version changes.
+  // Drop restore preview and entity selection whenever the chosen version changes.
   useEffect(() => {
     if (restorePreview && String(restorePreview.source.version_id) !== String(selectedVersion)) {
       setRestorePreview(null);
     }
   }, [selectedVersion, restorePreview]);
+
+  useEffect(() => {
+    setSelectedLegacyIds([]);
+  }, [selectedVersion]);
+
+  const toggleLegacyId = (legacyId) => {
+    setSelectedLegacyIds((current) => (
+      current.includes(legacyId)
+        ? current.filter((value) => value !== legacyId)
+        : [...current, legacyId].sort((a, b) => a - b)
+    ));
+  };
 
   const runPreview = async () => {
     setBusy(true);
@@ -277,16 +339,21 @@ export default function App() {
     setMessage(null);
     setRestorePreview(null);
     try {
+      const body = { version_id: Number(selectedVersion) };
+      if (partialMode) body.selected_legacy_ids = selectedLegacyIds;
       const result = await api('/api/restores/preview', {
         method: 'POST',
-        body: JSON.stringify({ version_id: Number(selectedVersion) }),
+        body: JSON.stringify(body),
       });
       setRestorePreview(result);
       await refresh();
       const diff = result.diff;
+      const scope = result.selected_legacy_ids
+        ? `部分恢复 ${result.selected_legacy_ids.length} 个实体（legacy_id ${result.selected_legacy_ids.join(', ')}），未选中当前记录原样保留；`
+        : '全量恢复；';
       setMessage({
         type: 'success',
-        text: `恢复预演通过：候选来自历史版本 #${result.source.version_id}（其代际 ${result.source.generation}），${result.row_count} 行；当前正式表代际 ${result.records_generation}，尚未切换。`,
+        text: `恢复预演通过：${scope}候选来自历史版本 #${result.source.version_id}（其代际 ${result.source.generation}），完整候选表 ${result.row_count} 行；当前正式表代际 ${result.records_generation}，尚未切换。`,
       });
       if (diff.added_count + diff.removed_count + diff.changed_count === 0) {
         setMessage((prev) => ({ ...prev, text: `${prev.text} 候选与当前正式表内容一致，确认仍会推进代际并封存当前表。` }));
@@ -312,7 +379,11 @@ export default function App() {
       });
       setMessage({
         type: 'success',
-        text: `恢复成功：代际 ${result.base_generation} → ${result.new_generation}，恢复来源 #${result.source_version_id}，恢复前的正式表已封存为 #${result.archived_version.version_id}（${result.archived_version.row_count} 行）`,
+        text: `恢复成功：代际 ${result.base_generation} → ${result.new_generation}，${
+          result.selected_legacy_ids
+            ? `仅恢复 legacy_id ${result.selected_legacy_ids.join(', ')}，其他当前记录保留；`
+            : '全量恢复；'
+        }恢复来源 #${result.source_version_id}，恢复前的正式表已封存为 #${result.archived_version.version_id}（${result.archived_version.row_count} 行）`,
       });
       setRestorePreview(null);
       await refresh();
@@ -370,6 +441,7 @@ export default function App() {
       setRestorePreview(null);
       setSelectedVersion('');
       setHistoryRows([]);
+      setSelectedLegacyIds([]);
       await refresh();
     } catch (error) {
       setMessage({ type: 'error', text: error.message });
@@ -463,11 +535,13 @@ export default function App() {
           <h2>只读历史版本（当前正式表代际 {state.records_generation}）</h2>
           <div className="actions">
             <button
-              disabled={busy || !selectedVersion}
+              disabled={busy || !selectedVersion || (partialMode && selectedLegacyIds.length === 0)}
               onClick={runRestorePreview}
-              title="从该版本生成候选正式表并核对差异，不改写任何记录"
+              title="从该版本生成完整候选正式表并核对差异，不改写任何记录"
             >
-              恢复预演所选版本
+              {partialMode && selectedLegacyIds.length > 0
+                ? `部分恢复预演（选中 ${selectedLegacyIds.length} 个实体）`
+                : '恢复预演所选版本'}
             </button>
             <button
               className="primary"
@@ -492,7 +566,31 @@ export default function App() {
                 {`所选：版本 #${selectedMeta.version_id}（${versionKindLabel(selectedMeta)}），封存的是代际 ${selectedMeta.generation} 的正式表，共 ${selectedMeta.row_count} 行。`}
               </p>
             )}
-            <DataTable title={`历史版本 #${selectedVersion} 内容`} rows={historyRows} empty="该版本为空（首次迁移前无正式表）" />
+            <label className="partial-toggle">
+              <input
+                type="checkbox"
+                checked={partialMode}
+                onChange={(event) => {
+                  setPartialMode(event.target.checked);
+                  setRestorePreview(null);
+                  if (!event.target.checked) setSelectedLegacyIds([]);
+                }}
+              />
+              部分恢复：勾选历史实体的稳定 legacy_id；未选中的当前记录原样保留，预演仍校验完整正式表约束
+            </label>
+            <section className="panel inner">
+              <h2>历史版本 #{selectedVersion} 内容 <span>{historyRows.length} 行</span></h2>
+              {historyRows.length === 0 ? (
+                <p>该版本为空（首次迁移前无正式表）</p>
+              ) : (
+                <HistoryRowTable
+                  rows={historyRows}
+                  partialMode={partialMode}
+                  selectedLegacyIds={selectedLegacyIds}
+                  onToggle={toggleLegacyId}
+                />
+              )}
+            </section>
           </>
         )}
 
@@ -500,11 +598,14 @@ export default function App() {
           <div className="preview restore-preview">
             <strong>恢复预演（未切换）</strong>
             <span>恢复来源版本: #{restorePreview.source.version_id}（{restorePreview.source.kind === 'restore' ? '恢复产物' : '迁移产物'}，内容代际 {restorePreview.source.generation}）</span>
+            <span>恢复范围: {restorePreview.selected_legacy_ids
+              ? `部分恢复实体 legacy_id ${restorePreview.selected_legacy_ids.join(', ')}，未选中当前记录原样保留`
+              : '全量恢复'}</span>
             <span>预演所见当前代际: {restorePreview.records_generation}</span>
-            <span>候选行数: {restorePreview.row_count}</span>
+            <span>完整候选正式表行数: {restorePreview.row_count}</span>
             <DiffSummary diff={restorePreview.diff} />
             <DiffTable diff={restorePreview.diff} />
-            <DataTable title="候选正式表内容" rows={restorePreview.candidate_rows} empty="候选表为空" />
+            <DataTable title="候选正式表内容（恢复后完整正式表）" rows={restorePreview.candidate_rows} empty="候选表为空" />
             <p className="hint">
               确认时在同一 SQLite 事务内：封存当前正式表为新的历史版本 → 切换候选表为 records → 正式表代际 +1。
               预演后若代际变化，确认将被拒绝且本预演作废，需要重新预演。

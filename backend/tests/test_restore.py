@@ -90,7 +90,7 @@ def test_restore_preview_is_read_through_and_shows_rows_constraints_and_diff(cli
     assert [row['id'] for row in preview['candidate_rows']] == [1, 2, 3]
     assert preview['diff']['formal_exists'] is True
     assert preview['diff']['added'] == []
-    assert preview['diff']['removed'] == [{'id': 4}]
+    assert preview['diff']['removed'] == [{'id': 4, 'legacy_id': 4}]
     assert preview['diff']['changed'] == []
     assert preview['diff']['removed_count'] == 1
 
@@ -107,6 +107,7 @@ def test_restore_preview_is_read_through_and_shows_rows_constraints_and_diff(cli
             'records_generation': 2,
             'row_count': 3,
             'diff_summary_json': state['restore_previews'][0]['diff_summary_json'],
+            'selected_legacy_ids_json': None,
             'created_at': state['restore_previews'][0]['created_at'],
         }
     ]
@@ -445,8 +446,8 @@ def test_restore_diff_reports_changed_columns_and_restore_then_reproduces_them(c
     change = preview['diff']['changed'][0]
     assert change['id'] == 1
     assert change['columns'] == ['label']
-    assert change['current'] == {'code': 'A-001', 'label': 'Alpha II', 'legacy_id': 1}
-    assert change['candidate'] == {'code': 'A-001', 'label': 'Alpha', 'legacy_id': 1}
+    assert change['current'] == {'id': 1, 'code': 'A-001', 'label': 'Alpha II'}
+    assert change['candidate'] == {'id': 1, 'code': 'A-001', 'label': 'Alpha'}
     assert preview['diff']['added_count'] == 0
     assert preview['diff']['removed_count'] == 0
 

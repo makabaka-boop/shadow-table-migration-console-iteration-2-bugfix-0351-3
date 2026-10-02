@@ -172,6 +172,7 @@ def init_db(db_path: str | None = None, *, reset: bool = False) -> None:
                 new_generation INTEGER NOT NULL,
                 archived_version_id INTEGER,
                 row_count INTEGER NOT NULL,
+                selected_legacy_ids_json TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 FOREIGN KEY(source_version_id) REFERENCES {HISTORY_TABLE}(version_id),
                 FOREIGN KEY(archived_version_id) REFERENCES {HISTORY_TABLE}(version_id)
@@ -255,6 +256,7 @@ def init_db(db_path: str | None = None, *, reset: bool = False) -> None:
                 records_generation INTEGER NOT NULL,
                 row_count INTEGER NOT NULL,
                 diff_summary_json TEXT NOT NULL,
+                selected_legacy_ids_json TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 FOREIGN KEY(source_version_id) REFERENCES {HISTORY_TABLE}(version_id)
             );
