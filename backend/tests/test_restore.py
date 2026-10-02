@@ -32,6 +32,19 @@ def _migrate_twice(client):
     commit_valid(client, preview_valid(client))
 
 
+def _migrate_with_mappings(client, mappings):
+    response = client.post(MAPPING_PREVIEW_PATH, json=mappings)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['ok'] is True
+    committed = client.post(
+        MAPPING_COMMIT_PATH,
+        json={'preview_id': body['preview_id'], 'source_revision': body['source_revision']},
+    )
+    assert committed.status_code == 200, committed.text
+    return committed.json()
+
+
 def restore_preview(client, version_id):
     response = client.post(RESTORE_PREVIEW_PATH, json={'version_id': version_id})
     assert response.status_code == 200, response.text
@@ -489,3 +502,162 @@ def test_commit_without_generation_field_still_works_and_server_generation_is_au
         },
     )
     assert replay.status_code in (404, 409)
+
+
+def test_partial_restore_keeps_unselected_current_rows(client):
+    _migrate_twice(client)  # gen 2: rows 1..4; version 2 sealed gen-1 rows 1..3
+
+    with sqlite3.connect(_db_path()) as direct:
+        direct.execute('PRAGMA busy_timeout=30000')
+        direct.execute("UPDATE legacy_records SET raw_name='  Beta II  ' WHERE legacy_id=2")
+    commit_valid(client, preview_valid(client))  # gen 3; version 3 sealed gen-2 rows 1..4
+
+    preview = client.post(
+        RESTORE_PREVIEW_PATH,
+        json={'version_id': 3, 'selected_legacy_ids': [2]},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    # The candidate is the complete next formal table: the selected entity
+    # taken from history plus every unselected current row kept as-is.
+    assert body['row_count'] == 4
+    assert body['candidate_rows'] == [
+        {'id': 1, 'code': 'A-001', 'label': 'Alpha', 'legacy_id': 1},
+        {'id': 2, 'code': 'B-002', 'label': 'Beta', 'legacy_id': 2},
+        {'id': 3, 'code': 'C-003', 'label': 'Gamma', 'legacy_id': 3},
+        {'id': 4, 'code': 'D-004', 'label': 'Delta', 'legacy_id': 4},
+    ]
+    # Unselected rows are not removals; only the selected entity shows up.
+    assert body['diff']['added_count'] == 0
+    assert body['diff']['removed'] == []
+    assert body['diff']['removed_count'] == 0
+    assert body['diff']['changed_count'] == 1
+    change = body['diff']['changed'][0]
+    assert change['id'] == 2
+    assert change['columns'] == ['label']
+    assert change['current'] == {'code': 'B-002', 'label': 'Beta II', 'legacy_id': 2}
+    assert change['candidate'] == {'code': 'B-002', 'label': 'Beta', 'legacy_id': 2}
+
+    committed = restore_commit(client, body)
+    assert committed.status_code == 200, committed.text
+    result = committed.json()
+    assert result['new_generation'] == 4
+    assert result['row_count'] == 4
+    assert result['archived_version'] == {'version_id': 4, 'row_count': 4}
+
+    state = client.get('/api/state').json()
+    assert state['records_generation'] == 4
+    assert state['records'] == body['candidate_rows']
+
+    # The sealed pre-restore version holds the whole previous formal table, so
+    # archive + ledger + diff explain a "restore only these entities" commit.
+    archived = client.get('/api/history/4/rows').json()['rows']
+    assert [row['id'] for row in archived] == [1, 2, 3, 4]
+    assert archived[1]['label'] == 'Beta II'
+    with sqlite3.connect(_db_path()) as direct:
+        ledger = direct.execute(
+            'SELECT source_version_id, base_generation, new_generation, '
+            'archived_version_id, row_count FROM restores'
+        ).fetchone()
+        assert ledger == (3, 3, 4, 4, 4)
+
+
+def test_partial_restore_selects_entities_by_stable_legacy_id(client):
+    # Numeric notes let the id mapping diverge from the stable legacy_id.
+    with sqlite3.connect(_db_path()) as direct:
+        direct.execute('PRAGMA busy_timeout=30000')
+        for legacy_id, note in ((1, '101'), (2, '102'), (3, '103')):
+            direct.execute(
+                'UPDATE legacy_records SET note=? WHERE legacy_id=?', (note, legacy_id)
+            )
+    mappings = {
+        'id': {'type': 'decimal_int', 'source_column': 'note'},
+        'code': {'type': 'copy', 'source_column': 'code'},
+        'label': {'type': 'trim', 'source_column': 'raw_name'},
+    }
+    _migrate_with_mappings(client, mappings)  # gen 1: ids 101..103 for legacy ids 1..3
+    with sqlite3.connect(_db_path()) as direct:
+        direct.execute("UPDATE legacy_records SET raw_name='  Alpha II  ' WHERE legacy_id=1")
+    _migrate_with_mappings(client, mappings)  # gen 2; version 2 sealed the gen-1 table
+
+    assert _ids(client.get('/api/state').json()) == [101, 102, 103]
+
+    # Selecting legacy_id 1 restores the entity whose historical row id is
+    # 101: the row primary key is not the entity handle.
+    preview = client.post(
+        RESTORE_PREVIEW_PATH,
+        json={'version_id': 2, 'selected_legacy_ids': [1]},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert [row['id'] for row in body['candidate_rows']] == [101, 102, 103]
+    assert body['diff']['changed_count'] == 1
+    assert body['diff']['changed'][0]['id'] == 101
+    assert body['diff']['removed_count'] == 0
+
+    committed = restore_commit(client, body)
+    assert committed.status_code == 200, committed.text
+    assert client.get('/api/records').json()['rows'] == [
+        {'id': 101, 'code': 'A-001', 'label': 'Alpha', 'legacy_id': 1},
+        {'id': 102, 'code': 'B-002', 'label': 'Beta', 'legacy_id': 2},
+        {'id': 103, 'code': 'C-003', 'label': 'Gamma', 'legacy_id': 3},
+    ]
+
+    # No entity carries legacy_id 101: the historical row whose primary key
+    # happens to be 101 must not be picked by selecting 101.
+    rejected = client.post(
+        RESTORE_PREVIEW_PATH,
+        json={'version_id': 2, 'selected_legacy_ids': [101]},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()['error']['code'] == 'invalid_selection'
+    state = client.get('/api/state').json()
+    assert state['restore_previews'] == []
+    assert state['shadow_tables'] == []
+
+
+def test_partial_restore_preview_fails_on_unique_conflict_with_unselected_rows(client):
+    commit_valid(client, preview_valid(client))  # gen 1: codes A-001/B-002/C-003
+
+    # Move code A-001 from entity 1 to entity 2 in the current table.
+    with sqlite3.connect(_db_path()) as direct:
+        direct.execute('PRAGMA busy_timeout=30000')
+        direct.execute("UPDATE legacy_records SET code='A-002' WHERE legacy_id=1")
+        direct.execute("UPDATE legacy_records SET code='A-001' WHERE legacy_id=2")
+    commit_valid(client, preview_valid(client))  # gen 2; version 2 sealed gen-1 rows
+
+    # Restoring entity 1 would reintroduce code A-001 while unselected entity
+    # 2 still carries it: the merged candidate violates UNIQUE(code), so the
+    # dry run must fail instead of reporting success.
+    response = client.post(
+        RESTORE_PREVIEW_PATH,
+        json={'version_id': 2, 'selected_legacy_ids': [1]},
+    )
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == 'constraint_failed'
+
+    state = client.get('/api/state').json()
+    assert state['records_generation'] == 2
+    assert _ids(state) == [1, 2, 3]
+    assert state['restore_previews'] == []
+    assert state['shadow_tables'] == []
+    with sqlite3.connect(_db_path()) as direct:
+        assert direct.execute('SELECT COUNT(*) FROM restore_selections').fetchone()[0] == 0
+
+
+def test_partial_restore_selection_must_be_non_empty_unique_and_present(client):
+    _migrate_twice(client)
+
+    for selection in ([], [1, 1], [1, 99]):
+        response = client.post(
+            RESTORE_PREVIEW_PATH,
+            json={'version_id': 2, 'selected_legacy_ids': selection},
+        )
+        assert response.status_code == 422, selection
+        assert response.json()['error']['code'] == 'invalid_selection'
+
+    state = client.get('/api/state').json()
+    assert state['records_generation'] == 2
+    assert _ids(state) == [1, 2, 3, 4]
+    assert state['restore_previews'] == []
+    assert state['shadow_tables'] == []

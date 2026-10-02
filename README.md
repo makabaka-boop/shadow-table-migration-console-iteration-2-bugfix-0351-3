@@ -53,8 +53,8 @@ npm --prefix frontend run build
 
 ## 恢复预演与确认
 
-- `POST /api/restores/preview`，入参 `{"version_id": N}`：
-  - 从指定**已封存只读**历史版本复制内容，生成带最终约束（`PRIMARY KEY`、`NOT NULL`、`UNIQUE`）的候选表 `records_restore_candidate_<preview_id>`。
+- `POST /api/restores/preview`，入参 `{"version_id": N, "selected_legacy_ids": 可选}`：
+  - 从指定**已封存只读**历史版本复制内容，生成带最终约束（`PRIMARY KEY`、`NOT NULL`、`UNIQUE`）的候选表 `records_restore_candidate_<preview_id>`；带 `selected_legacy_ids` 时仅选中实体取自历史，未选中的当前实体原样并入候选。
   - 返回复核信息：候选行数、来源版本（版本号、种类、内容代际、行数）、与当前正式表的差异（候选新增 / 移除 / 字段变化，明细最多 200 条）。
   - 预演全程在独立事务中完成，**不改写任何记录、不封存、不切换、不推进代际**。
 - `POST /api/restores/commit`，入参 `{"preview_id": ..., "records_generation": 可选}`：

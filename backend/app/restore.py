@@ -13,6 +13,7 @@ from .db import (
     HISTORY_TABLE,
     RESTORES_TABLE,
     RESTORE_PREVIEW_META_TABLE,
+    RESTORE_SELECTIONS_TABLE,
     ServiceError,
     advance_records_generation,
     db_session,
@@ -107,16 +108,41 @@ def _row_signature(row: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(row[column] for column in FORMAL_COLUMNS)
 
 
+def _planned_candidate_rows(
+    conn: sqlite3.Connection,
+    history_rows: list[dict[str, Any]],
+    selected: list[int] | None,
+) -> list[dict[str, Any]]:
+    """Compute the rows the restored formal table must hold.
+
+    A full restore takes the sealed version as-is.  A partial restore selects
+    entities by their stable legacy_id: only the selected entities are replaced
+    with their historical rows, while every unselected current entity is kept
+    untouched.  The merged candidate must therefore still satisfy the complete
+    formal-table constraints (PRIMARY KEY / NOT NULL / UNIQUE) on its own.
+    """
+    if selected is None:
+        return history_rows
+    if not selected or len(selected) != len(set(selected)):
+        raise ServiceError(422, "invalid_selection", "select unique legacy IDs")
+    chosen = set(selected)
+    available = {row["legacy_id"] for row in history_rows}
+    if not chosen.issubset(available):
+        raise ServiceError(422, "invalid_selection", "selected record missing in history")
+    restored = [row for row in history_rows if row["legacy_id"] in chosen]
+    kept = [row for row in _formal_rows(conn) if row["legacy_id"] not in chosen]
+    return sorted(kept + restored, key=lambda row: row["id"])
+
+
 def _diff_against_current(
     conn: sqlite3.Connection,
-    version_id: int,
-    source_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Compare candidate content with the current formal table without writing."""
     if not _formal_table_exists(conn):
         return {
             "formal_exists": False,
-            "added": [{"id": row["id"]} for row in source_rows],
+            "added": [{"id": row["id"]} for row in candidate_rows],
             "removed": [],
             "changed": [],
             "truncated": False,
@@ -124,14 +150,14 @@ def _diff_against_current(
 
     current_rows = _formal_rows(conn)
     current_by_id = {row["id"]: row for row in current_rows}
-    candidate_by_id = {row["id"]: row for row in source_rows}
+    candidate_by_id = {row["id"]: row for row in candidate_rows}
 
     added: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
     changed: list[dict[str, Any]] = []
     truncated = False
 
-    for row in source_rows:
+    for row in candidate_rows:
         current = current_by_id.get(row["id"])
         if current is None:
             added.append({"id": row["id"]})
@@ -197,50 +223,60 @@ def create_restore_preview(
             conn.execute("BEGIN IMMEDIATE")
             version = _require_locked_version(conn, payload.version_id)
             records_generation = get_records_generation(conn)
-            source_rows = _history_rows(conn, version["version_id"])
+            history_rows = _history_rows(conn, version["version_id"])
             selected = payload.selected_legacy_ids
             stored_count = conn.execute(
                 f"SELECT COUNT(*) FROM {HISTORY_ROWS_TABLE} WHERE version_id=?",
                 (version["version_id"],),
             ).fetchone()[0]
-            if stored_count != version["row_count"] or len(source_rows) != version["row_count"]:
+            if stored_count != version["row_count"] or len(history_rows) != version["row_count"]:
                 raise ServiceError(
                     500,
                     "history_integrity",
                     "retained history row count does not match its sealed metadata",
                 )
 
-            if selected is not None:
-                if not selected or len(selected) != len(set(selected)):
-                    raise ServiceError(422, 'invalid_selection', 'select unique legacy IDs')
-                source_rows = [row for row in source_rows if row['id'] in selected]
-                if len(source_rows) != len(selected):
-                    raise ServiceError(422, 'invalid_selection', 'selected record missing in history')
-            diff = _diff_against_current(conn, version["version_id"], source_rows)
+            # The candidate always describes the complete next formal table:
+            # for a partial restore the unselected current rows stay in place.
+            candidate_rows = _planned_candidate_rows(conn, history_rows, selected)
+            diff = _diff_against_current(conn, candidate_rows)
 
             _create_candidate_table(conn, candidate_name)
-            conn.executemany(
-                f"""
-                INSERT INTO {candidate_name}(id, code, label, legacy_id)
-                VALUES (?, ?, ?, ?)
-                """,
-                [
-                    (row["id"], row["code"], row["label"], row["legacy_id"])
-                    for row in source_rows
-                ],
-            )
+            try:
+                conn.executemany(
+                    f"""
+                    INSERT INTO {candidate_name}(id, code, label, legacy_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (row["id"], row["code"], row["label"], row["legacy_id"])
+                        for row in candidate_rows
+                    ],
+                )
+            except sqlite3.IntegrityError as exc:
+                # A selected historical row can clash with a kept current row
+                # on id/code/legacy_id.  The merged candidate carries the final
+                # constraints, so the dry run fails here instead of reporting a
+                # success the real table could never satisfy.
+                raise ServiceError(
+                    422,
+                    "constraint_failed",
+                    f"restore candidate violates formal-table constraints: {exc}",
+                ) from exc
             candidate_count = conn.execute(f"SELECT COUNT(*) FROM {candidate_name}").fetchone()[0]
-            if candidate_count != len(source_rows):
-                raise RuntimeError("candidate row count does not match history version")
+            if candidate_count != len(candidate_rows):
+                raise RuntimeError("candidate row count does not match planned restore content")
 
             diff_summary = {
                 key: diff[key]
                 for key in ("formal_exists", "added_count", "removed_count", "changed_count", "truncated")
                 if key in diff
             }
-            conn.execute('CREATE TABLE IF NOT EXISTS restore_selections (preview_id TEXT PRIMARY KEY, selection_json TEXT NOT NULL)')
             if selected is not None:
-                conn.execute('INSERT INTO restore_selections VALUES (?,?)', (preview_id, json.dumps(selected)))
+                conn.execute(
+                    f"INSERT INTO {RESTORE_SELECTIONS_TABLE}(preview_id, selection_json) VALUES (?, ?)",
+                    (preview_id, json.dumps(selected)),
+                )
             conn.execute(
                 f"""
                 INSERT INTO {RESTORE_PREVIEW_META_TABLE}
@@ -275,7 +311,7 @@ def create_restore_preview(
                 "row_count": candidate_count,
                 "source": source_description,
                 "diff": diff,
-                "candidate_rows": source_rows,
+                "candidate_rows": candidate_rows,
             }
         except Exception:
             conn.rollback()
@@ -285,6 +321,10 @@ def create_restore_preview(
                 f"DELETE FROM {RESTORE_PREVIEW_META_TABLE} WHERE preview_id=?",
                 (preview_id,),
             )
+            conn.execute(
+                f"DELETE FROM {RESTORE_SELECTIONS_TABLE} WHERE preview_id=?",
+                (preview_id,),
+            )
             raise
 
 
@@ -292,6 +332,10 @@ def _discard_restore_preview(conn: sqlite3.Connection, preview_id: str) -> None:
     conn.execute(f"DROP TABLE IF EXISTS {_candidate_name(preview_id)}")
     conn.execute(
         f"DELETE FROM {RESTORE_PREVIEW_META_TABLE} WHERE preview_id=?",
+        (preview_id,),
+    )
+    conn.execute(
+        f"DELETE FROM {RESTORE_SELECTIONS_TABLE} WHERE preview_id=?",
         (preview_id,),
     )
 
@@ -357,26 +401,30 @@ def commit_restore(
                 )
 
             source_version = _require_locked_version(conn, preview["source_version_id"])
-            source_rows = _history_rows(conn, source_version["version_id"])
-            conn.execute('CREATE TABLE IF NOT EXISTS restore_selections (preview_id TEXT PRIMARY KEY, selection_json TEXT NOT NULL)')
-            selection = conn.execute('SELECT selection_json FROM restore_selections WHERE preview_id=?', (payload.preview_id,)).fetchone()
-            if selection is not None:
-                chosen = json.loads(selection[0])
-                source_rows = [row for row in source_rows if row['id'] in chosen]
+            history_rows = _history_rows(conn, source_version["version_id"])
+            selection = conn.execute(
+                f"SELECT selection_json FROM {RESTORE_SELECTIONS_TABLE} WHERE preview_id=?",
+                (payload.preview_id,),
+            ).fetchone()
+            selected = json.loads(selection["selection_json"]) if selection is not None else None
+            # Recompute the exact content the preview planned.  The generation
+            # check above pins the formal table, so the kept unselected rows
+            # are the same ones the preview merged into the candidate.
+            expected_rows = _planned_candidate_rows(conn, history_rows, selected)
             candidate_rows = [
                 dict(row)
                 for row in conn.execute(
                     f"SELECT id, code, label, legacy_id FROM {candidate_name} ORDER BY id"
                 )
             ]
-            if len(candidate_rows) != len(source_rows) or any(
-                _row_signature(candidate_rows[i]) != _row_signature(source_rows[i])
-                for i in range(len(source_rows))
+            if len(candidate_rows) != len(expected_rows) or any(
+                _row_signature(candidate_rows[i]) != _row_signature(expected_rows[i])
+                for i in range(len(expected_rows))
             ):
                 raise ServiceError(
                     409,
                     "candidate_changed",
-                    "restore candidate no longer matches the sealed history version; preview again",
+                    "restore candidate no longer matches the planned restore content; preview again",
                 )
 
             if not _formal_table_exists(conn):

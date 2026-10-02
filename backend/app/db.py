@@ -22,6 +22,7 @@ MIGRATIONS_TABLE = "migrations"
 RESTORES_TABLE = "restores"
 PREVIEW_META_TABLE = "migration_preview_meta"
 RESTORE_PREVIEW_META_TABLE = "restore_preview_meta"
+RESTORE_SELECTIONS_TABLE = "restore_selections"
 
 # Monotonic revision scopes.  The legacy revision advances on every edit of
 # the source table.  The formal-table generation advances once per transaction
@@ -108,6 +109,7 @@ def init_db(db_path: str | None = None, *, reset: bool = False) -> None:
                     "restores",
                     "migration_preview_meta",
                     "restore_preview_meta",
+                    "restore_selections",
                     "revision_meta",
                     "fault_injection_state",
                 ):
@@ -259,6 +261,11 @@ def init_db(db_path: str | None = None, *, reset: bool = False) -> None:
                 FOREIGN KEY(source_version_id) REFERENCES {HISTORY_TABLE}(version_id)
             );
 
+            CREATE TABLE IF NOT EXISTS {RESTORE_SELECTIONS_TABLE} (
+                preview_id TEXT PRIMARY KEY,
+                selection_json TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS fault_injection_state (
                 name TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
@@ -348,6 +355,7 @@ def expire_all_previews(conn: sqlite3.Connection) -> None:
     """
     conn.execute(f"DELETE FROM {PREVIEW_META_TABLE}")
     conn.execute(f"DELETE FROM {RESTORE_PREVIEW_META_TABLE}")
+    conn.execute(f"DELETE FROM {RESTORE_SELECTIONS_TABLE}")
     leftover_tables = [
         row[0]
         for row in conn.execute(
